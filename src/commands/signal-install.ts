@@ -42,7 +42,17 @@ function looksLikeNativeBinary(name: string): boolean {
   return /native|aarch64|x86_64|x86-64|arm64/.test(name.toLowerCase());
 }
 
-function pickAsset(assets: ReleaseAsset[], platform: NodeJS.Platform, arch: string) {
+type PickedAsset = {
+  asset: NamedAsset;
+  /** Whether this is the platform-independent JVM archive (requires java). */
+  isJvm: boolean;
+};
+
+function pickAsset(
+  assets: ReleaseAsset[],
+  platform: NodeJS.Platform,
+  arch: string,
+): PickedAsset | undefined {
   const withName = assets.filter((asset): asset is NamedAsset =>
     Boolean(asset.name && asset.browser_download_url),
   );
@@ -53,6 +63,9 @@ function pickAsset(assets: ReleaseAsset[], platform: NodeJS.Platform, arch: stri
   const byName = (pattern: RegExp) =>
     archives.find((asset) => pattern.test(asset.name.toLowerCase()));
 
+  const asNative = (a: NamedAsset | undefined) => (a ? { asset: a, isJvm: false } : undefined);
+  const asJvm = (a: NamedAsset | undefined) => (a ? { asset: a, isJvm: true } : undefined);
+
   // On non-x64 architectures, native binaries (currently x86-64 only) will
   // fail with "Exec format error".  Prefer the platform-independent JVM
   // archive instead, which works on any architecture that has a JRE.
@@ -61,7 +74,7 @@ function pickAsset(assets: ReleaseAsset[], platform: NodeJS.Platform, arch: stri
   if (platform === "linux") {
     if (canRunNative) {
       // x86-64: prefer native build, then any linux archive, then any archive
-      return byName(/linux-native/) || byName(/linux/) || archives[0];
+      return asNative(byName(/linux-native/) || byName(/linux/) || archives[0]);
     }
     // Non-x64 (aarch64, armv7, etc.): skip native builds, pick the
     // platform-independent JVM archive (the one without a platform tag).
@@ -70,18 +83,18 @@ function pickAsset(assets: ReleaseAsset[], platform: NodeJS.Platform, arch: stri
         !looksLikeNativeBinary(a.name) &&
         !/(linux|macos|osx|darwin|windows|win)/.test(a.name.toLowerCase()),
     );
-    return jvmArchive || byName(/linux/) || archives[0];
+    return asJvm(jvmArchive) || asNative(byName(/linux/) || archives[0]);
   }
 
   if (platform === "darwin") {
-    return byName(/macos|osx|darwin/) || archives[0];
+    return asNative(byName(/macos|osx|darwin/) || archives[0]);
   }
 
   if (platform === "win32") {
-    return byName(/windows|win/) || archives[0];
+    return asNative(byName(/windows|win/) || archives[0]);
   }
 
-  return archives[0];
+  return asNative(archives[0]);
 }
 
 async function downloadToFile(url: string, dest: string, maxRedirects = 5): Promise<void> {
@@ -129,6 +142,17 @@ async function findSignalCliBinary(root: string): Promise<string | null> {
   return candidates[0] ?? null;
 }
 
+async function detectJava(): Promise<boolean> {
+  try {
+    const result = await runCommandWithTimeout(["java", "-version"], {
+      timeoutMs: 5_000,
+    });
+    return result.code === 0;
+  } catch {
+    return false;
+  }
+}
+
 export async function installSignalCli(runtime: RuntimeEnv): Promise<SignalInstallResult> {
   if (process.platform === "win32") {
     return {
@@ -155,15 +179,31 @@ export async function installSignalCli(runtime: RuntimeEnv): Promise<SignalInsta
   const payload = (await response.json()) as ReleaseResponse;
   const version = payload.tag_name?.replace(/^v/, "") ?? "unknown";
   const assets = payload.assets ?? [];
-  const asset = pickAsset(assets, process.platform, process.arch);
-  const assetName = asset?.name ?? "";
-  const assetUrl = asset?.browser_download_url ?? "";
+  const picked = pickAsset(assets, process.platform, process.arch);
+  const assetName = picked?.asset.name ?? "";
+  const assetUrl = picked?.asset.browser_download_url ?? "";
+  const isJvm = picked?.isJvm ?? false;
 
   if (!assetName || !assetUrl) {
     return {
       ok: false,
       error: "No compatible release asset found for this platform.",
     };
+  }
+
+  // The JVM archive is a shell-script wrapper that requires a Java runtime.
+  // Bail early with a clear message rather than installing something unusable.
+  if (isJvm) {
+    const hasJava = await detectJava();
+    if (!hasJava) {
+      return {
+        ok: false,
+        error:
+          `No native signal-cli build is available for ${process.arch}. ` +
+          "The JVM-based archive requires Java (JRE 21+). " +
+          "Install Java first (e.g. `sudo apt install default-jre`) and try again.",
+      };
+    }
   }
 
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-signal-"));
@@ -180,7 +220,11 @@ export async function installSignalCli(runtime: RuntimeEnv): Promise<SignalInsta
       timeoutMs: 60_000,
     });
   } else if (assetName.endsWith(".tar.gz") || assetName.endsWith(".tgz")) {
-    await runCommandWithTimeout(["tar", "-xzf", archivePath, "-C", installRoot], {
+    // JVM archives contain a top-level directory (signal-cli-VERSION/).
+    // Strip it so contents land directly in installRoot, keeping the path
+    // structure consistent with the native archive (which has no wrapper dir).
+    const stripArgs = isJvm ? ["--strip-components=1"] : [];
+    await runCommandWithTimeout(["tar", "-xzf", archivePath, "-C", installRoot, ...stripArgs], {
       timeoutMs: 60_000,
     });
   } else {
