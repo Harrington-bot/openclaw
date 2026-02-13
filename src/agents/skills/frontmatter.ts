@@ -61,6 +61,10 @@ function parseInstallSpec(input: unknown): SkillInstallSpec | undefined {
   if (osList.length > 0) {
     spec.os = osList;
   }
+  const archList = normalizeStringList(raw.arch);
+  if (archList.length > 0) {
+    spec.arch = archList;
+  }
   if (typeof raw.formula === "string") {
     spec.formula = raw.formula;
   }

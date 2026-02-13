@@ -138,4 +138,39 @@ describe("buildWorkspaceSkillStatus", () => {
       expect(skill?.install).toEqual([]);
     }
   });
+
+  it("filters install options by arch", async () => {
+    const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-"));
+    const skillDir = path.join(workspaceDir, "skills", "arch-skill");
+
+    await writeSkill({
+      dir: skillDir,
+      name: "arch-skill",
+      description: "Arch-specific installs",
+      metadata: `{"openclaw":{"requires":{"bins":["missing-bin"]},"install":[{"id":"linux-x64","kind":"download","os":["linux"],"arch":["x64"],"url":"https://example.com/linux-x64.tar.bz2"},{"id":"linux-arm64","kind":"download","os":["linux"],"arch":["arm64"],"url":"https://example.com/linux-arm64.tar.bz2"},{"id":"model","kind":"download","url":"https://example.com/model.tar.bz2"}]}}`,
+    });
+
+    const report = buildWorkspaceSkillStatus(workspaceDir, {
+      managedSkillsDir: path.join(workspaceDir, ".managed"),
+    });
+    const skill = report.skills.find((entry) => entry.name === "arch-skill");
+
+    expect(skill).toBeDefined();
+    const ids = skill?.install.map((opt) => opt.id) ?? [];
+    // The model download (no arch/os constraint) should always appear.
+    expect(ids).toContain("model");
+    if (process.platform === "linux") {
+      if (process.arch === "x64") {
+        expect(ids).toContain("linux-x64");
+        expect(ids).not.toContain("linux-arm64");
+      } else if (process.arch === "arm64") {
+        expect(ids).toContain("linux-arm64");
+        expect(ids).not.toContain("linux-x64");
+      }
+    } else {
+      // Non-linux: the OS-gated linux entries should not appear.
+      expect(ids).not.toContain("linux-x64");
+      expect(ids).not.toContain("linux-arm64");
+    }
+  });
 });

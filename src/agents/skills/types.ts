@@ -6,6 +6,8 @@ export type SkillInstallSpec = {
   label?: string;
   bins?: string[];
   os?: string[];
+  /** CPU architecture filter (Node.js `process.arch` values, e.g. "x64", "arm64"). */
+  arch?: string[];
   formula?: string;
   package?: string;
   module?: string;

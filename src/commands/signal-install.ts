@@ -34,35 +34,54 @@ function looksLikeArchive(name: string): boolean {
   return name.endsWith(".tar.gz") || name.endsWith(".tgz") || name.endsWith(".zip");
 }
 
-function pickAsset(assets: ReleaseAsset[], platform: NodeJS.Platform) {
+/**
+ * Check whether a release asset name looks like a native/precompiled binary
+ * (e.g. "Linux-native", "macos-native", "aarch64", "x86_64").
+ */
+function looksLikeNativeBinary(name: string): boolean {
+  return /native|aarch64|x86_64|x86-64|arm64/.test(name.toLowerCase());
+}
+
+function pickAsset(assets: ReleaseAsset[], platform: NodeJS.Platform, arch: string) {
   const withName = assets.filter((asset): asset is NamedAsset =>
     Boolean(asset.name && asset.browser_download_url),
   );
+
+  // Archives only, excluding signature files (.asc)
+  const archives = withName.filter((a) => looksLikeArchive(a.name.toLowerCase()));
+
   const byName = (pattern: RegExp) =>
-    withName.find((asset) => pattern.test(asset.name.toLowerCase()));
+    archives.find((asset) => pattern.test(asset.name.toLowerCase()));
+
+  // On non-x64 architectures, native binaries (currently x86-64 only) will
+  // fail with "Exec format error".  Prefer the platform-independent JVM
+  // archive instead, which works on any architecture that has a JRE.
+  const canRunNative = arch === "x64";
 
   if (platform === "linux") {
-    return (
-      byName(/linux-native/) ||
-      byName(/linux/) ||
-      withName.find((asset) => looksLikeArchive(asset.name.toLowerCase()))
+    if (canRunNative) {
+      // x86-64: prefer native build, then any linux archive, then any archive
+      return byName(/linux-native/) || byName(/linux/) || archives[0];
+    }
+    // Non-x64 (aarch64, armv7, etc.): skip native builds, pick the
+    // platform-independent JVM archive (the one without a platform tag).
+    const jvmArchive = archives.find(
+      (a) =>
+        !looksLikeNativeBinary(a.name) &&
+        !/(linux|macos|osx|darwin|windows|win)/.test(a.name.toLowerCase()),
     );
+    return jvmArchive || byName(/linux/) || archives[0];
   }
 
   if (platform === "darwin") {
-    return (
-      byName(/macos|osx|darwin/) ||
-      withName.find((asset) => looksLikeArchive(asset.name.toLowerCase()))
-    );
+    return byName(/macos|osx|darwin/) || archives[0];
   }
 
   if (platform === "win32") {
-    return (
-      byName(/windows|win/) || withName.find((asset) => looksLikeArchive(asset.name.toLowerCase()))
-    );
+    return byName(/windows|win/) || archives[0];
   }
 
-  return withName.find((asset) => looksLikeArchive(asset.name.toLowerCase()));
+  return archives[0];
 }
 
 async function downloadToFile(url: string, dest: string, maxRedirects = 5): Promise<void> {
@@ -136,7 +155,7 @@ export async function installSignalCli(runtime: RuntimeEnv): Promise<SignalInsta
   const payload = (await response.json()) as ReleaseResponse;
   const version = payload.tag_name?.replace(/^v/, "") ?? "unknown";
   const assets = payload.assets ?? [];
-  const asset = pickAsset(assets, process.platform);
+  const asset = pickAsset(assets, process.platform, process.arch);
   const assetName = asset?.name ?? "";
   const assetUrl = asset?.browser_download_url ?? "";
 

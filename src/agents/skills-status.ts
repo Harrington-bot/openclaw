@@ -124,9 +124,17 @@ function normalizeInstallOptions(
   }
 
   const platform = process.platform;
+  const arch = process.arch;
   const filtered = install.filter((spec) => {
     const osList = spec.os ?? [];
-    return osList.length === 0 || osList.includes(platform);
+    if (osList.length > 0 && !osList.includes(platform)) {
+      return false;
+    }
+    const archList = spec.arch ?? [];
+    if (archList.length > 0 && !archList.includes(arch)) {
+      return false;
+    }
+    return true;
   });
   if (filtered.length === 0) {
     return [];
